@@ -302,6 +302,7 @@ def phifdt_pipe(
         correct_distortion = CONFIG['correct_distortion']
         correct_fringes = CONFIG['correct_fringes']
         correct_ghost = CONFIG['correct_ghost']
+        ghost_params = CONFIG['ghost_params']
         putmediantozero = CONFIG['putmediantozero']
         debug = CONFIG['debug']
         vers = CONFIG['vers']
@@ -494,43 +495,43 @@ def phifdt_pipe(
     # READ FLAT FIELDS
     #-----------------
 
-    if flat_c:
-        printc('-->>>>>>> Reading flat file'+flat_f,color=bcolors.OKGREEN)
-        printc('          Assumes they are already normalized to ONE ',color=bcolors.OKGREEN)
-        printc('          input should be [wave X Stokes,y-dim,x-dim].',color=bcolors.OKGREEN)
+    # if flat_c:
+    printc('-->>>>>>> Reading flat file'+flat_f,color=bcolors.OKGREEN)
+    printc('          Assumes they are already normalized to ONE ',color=bcolors.OKGREEN)
+    printc('          input should be [wave X Stokes,y-dim,x-dim].',color=bcolors.OKGREEN)
 
-        try:
-            dummy,flat_header = fits_get(flat_f,scale = False)
-            fz_d,fy_d,fx_d = dummy.shape
-        except Exception:
-            printc("ERROR, something happened while reading the file: {}",flat_f,color=bcolors.FAIL)
-            return 0
+    try:
+        dummy,flat_header = fits_get(flat_f,scale = False)
+        fz_d,fy_d,fx_d = dummy.shape
+    except Exception:
+        printc("ERROR, something happened while reading the file: {}",flat_f,color=bcolors.FAIL)
+        return 0
 
-        flat = np.zeros([24,2048,2048]).astype(np.float32)
-        PXBEG1_f  = int(flat_header['PXBEG1']) - 1           
-        PXEND1_f  = int(flat_header['PXEND1']) - 1          
-        PXBEG2_f  = int(flat_header['PXBEG2']) - 1           
-        PXEND2_f  = int(flat_header['PXEND2']) - 1 
-        if fx_d < 2047:    
-            printc('         input flat was cropped to: [',PXBEG1_f,',',PXEND1_f,'],[',PXBEG2_f,',',PXEND2_f,']',color=bcolors.WARNING)
+    flat = np.zeros([24,2048,2048]).astype(np.float32)
+    PXBEG1_f  = int(flat_header['PXBEG1']) - 1           
+    PXEND1_f  = int(flat_header['PXEND1']) - 1          
+    PXBEG2_f  = int(flat_header['PXBEG2']) - 1           
+    PXEND2_f  = int(flat_header['PXEND2']) - 1 
+    if fx_d < 2047:    
+        printc('         input flat was cropped to: [',PXBEG1_f,',',PXEND1_f,'],[',PXBEG2_f,',',PXEND2_f,']',color=bcolors.WARNING)
 
-        flat[:,PXBEG1_f:PXEND1_f+1,PXBEG2_f:PXEND2_f+1] = dummy
-        del dummy
+    flat[:,PXBEG1_f:PXEND1_f+1,PXBEG2_f:PXEND2_f+1] = dummy
+    del dummy
 
-        printc('-->>>>>>> Reshaping Flat to [wave,Stokes,y-dim,x-dim] ',color=bcolors.OKGREEN)
-        fz,fy,fx = flat.shape
-        flat = np.reshape(flat,(fz//4,4,fy,fx))
+    printc('-->>>>>>> Reshaping Flat to [wave,Stokes,y-dim,x-dim] ',color=bcolors.OKGREEN)
+    fz,fy,fx = flat.shape
+    flat = np.reshape(flat,(fz//4,4,fy,fx))
 
-        if SIX_FLATS:
-            for i in range(6):
-                mm = np.mean(flat[i,:,:,:],axis = 0)
-                flat[i,:,:,:] = mm[np.newaxis,:,:]
+    if SIX_FLATS:
+        for i in range(6):
+            mm = np.mean(flat[i,:,:,:],axis = 0)
+            flat[i,:,:,:] = mm[np.newaxis,:,:]
 
-        if verbose:
-            plib.show_one(flat[0,0,:,:],xlabel='pixel',ylabel='pixel',title='Flat first image raw (1 of 24)',cbarlabel='Any (as input)',save=None,cmap='gray')
+    if verbose:
+        plib.show_one(flat[0,0,:,:],xlabel='pixel',ylabel='pixel',title='Flat first image raw (1 of 24)',cbarlabel='Any (as input)',save=None,cmap='gray')
 
-    else:
-        printc('-->>>>>>> No flats mode                    ',color=bcolors.WARNING)
+    # else:
+    #     printc('-->>>>>>> No flats mode                    ',color=bcolors.WARNING)
 
     #-----------------
     # READ AND CORRECT DARK FIELD
@@ -539,6 +540,9 @@ def phifdt_pipe(
         data,header  = phi_correct_dark(dark_f,data,header,data_scale,verbose = verbose)
     else:
         printc('-->>>>>>> No darks mode                    ',color=bcolors.WARNING)
+
+
+    
 
     #-----------------
     # CORRECT DISTORTION
@@ -720,34 +724,12 @@ def phifdt_pipe(
             printc('          NEW Flat continuum position at wave: ', cpos_f,color=bcolors.OKBLUE)
             printc('          NEW Flat data wave axis [mA]: ',wave_axis_f,color=bcolors.OKBLUE)
 
-    # TODO: INTERPOLATE THE FLAT TO MATCH THE WAVELENG (CAVITY)
+    #-----------------
+    # GHOST CORRECTION  
+    #-----------------
 
-    # from scipy.interpolate import RegularGridInterpolator
-    # x = np.linspace(0,2047,2048).astype(int)
-    # y = np.linspace(0,2047,2048).astype(int)
-    # z = np.array([-300.,-140.,-70.,0.,70.,140.,300.]) #ojo con el -300
-    # zn = np.array([-175.,-140.,-105.,-70.,-35.,0.,35.,70.,105.,140.,175.,300.])
-
-    # flat_rsw1 = np.concatenate(((flat_rsw1[5,:,:,:])[np.newaxis,:,:,:],flat_rsw1))
-    # fn = RegularGridInterpolator((z,y,x), flat_rsw1[:,0,:,:])
-    # pts = np.array([-40,10,10])
-    # print(fn(pts))
-
-    #     pts = np.meshgrid(-40.,y,x)
-    # pts = np.array([m.flatten() for m in pts])
-    # flat_n = fn(pts.T)
-    # result = flat_n.reshape((2048,2048))
-    # plt.imshow(result,vmin=0.9,vmax=1.1)
-
-    # flat_n = np.zeros((12,4,2048,2048))
-
-    # for i in range(4):
-    #   fn = RegularGridInterpolator((z,y,x), flat_rsw1[:,i,:,:],bounds_error=False)
-    #   for j in range(12):
-    #     print(i,zn[j])
-    #     pts_list = np.meshgrid(zn[j],y,x)
-    #     pts = np.array([m.flatten() for m in pts_list])
-    #     flat_n[j,i,:,:] = fn(pts.T).reshape((2048,2048))
+    if correct_ghost:
+        data, header = phi_correct_ghost(data, header, flat, ghost_params)
 
     #-----------------
     # APPLY FLAT CORRECTION 
@@ -803,14 +785,6 @@ def phifdt_pipe(
 
     if prefilter:
         data,header  = phi_correct_prefilter(prefilter_fits,header,data,voltagesData,verbose = verbose)
-
-
-    #-----------------
-    # GHOST CORRECTION  
-    #-----------------
-
-    if correct_ghost:
-        data,header = phi_correct_ghost(data,header,radius,verbose = verbose,extra_offset = extra_offset)
 
     #-----------------
     # REALIGN DATA BEFORE DEMODULATION

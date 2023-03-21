@@ -40,6 +40,7 @@ import time
 import numpy as np
 from matplotlib import pyplot as plt
 from scipy.ndimage import gaussian_filter, map_coordinates
+from scipy.ndimage import rotate as sp_rotate
 
 from ..GENtools import plot_lib as plib
 from ..GENtools.processing import MP # for multi-processing
@@ -1056,508 +1057,74 @@ def phi_correct_ghost_single(data, header, rad, verbose=False, center=0):
     return data, header
 
 
-def phi_correct_ghost(data, header, rad, verbose=False, extra_offset=0):
-    '''
-    Startup version on Jun 2021
-    '''
-    version = 'phi_correct_ghost V1.0 Jun 2021'
+def phi_correct_ghost(data, header, flat, params, verbose=False):
+    """
+    Apply ghost correction following algorithm by A. Feller
+    """
 
-    only_one_vorbose = 1
-    center = np.array([header['CRPIX1'], header['CRPIX2']]).astype(int)
-    printc('        Read center from header (updated): x=', center[0], ' y=', center[1], color=bcolors.OKBLUE)
-    xd = int(header['NAXIS1'])
-    yd = int(header['NAXIS2'])
-    zd = int(header['NAXIS3'])
-    PXBEG1 = int(header['PXBEG1']) - 1
-    PXEND1 = int(header['PXEND1']) - 1
-    PXBEG2 = int(header['PXBEG2']) - 1
-    PXEND2 = int(header['PXEND2']) - 1
-
-    # Center at: x= 1005  y= 953  radius= 517
-    # printc('          Center at: x=',c[1],' y=',c[0],' radius=',radius,color=bcolors.OKBLUE)
-
-    if verbose and only_one_vorbose:
-        datap = np.copy(data)
+    version = 'phi_correct_ghost V2.0 Mar 2023'
 
     printc('-->>>>>>> Correcting ghost image ', color=bcolors.OKGREEN)
 
-    # common part
-    coef = [-1.98787669, 1945.28944245]  # empirically (first version)
-    # coef = [-1.9999,1942.7] #empirically (updated by trial and error) MODIFIED FOR CONJUNTION DATA (COMMENTED)
-    coef = [-1.98787669, 1945.28944245 - extra_offset]  #
-
-    # correct center:
-    center_c = np.copy(center)
-    center_c[0] += PXBEG1
-    center_c[1] += PXBEG2
-    poly1d_fn = np.poly1d(coef)
-    sh = poly1d_fn(center_c).astype(int)
-    sh_float = poly1d_fn(center_c)
-    printc('          image center: x: ', center[0], ' y: ', center[1], color=bcolors.OKGREEN)
-    printc('          image center [for 2048]: x: ', center_c[0], ' y: ', center_c[1], PXBEG1, PXBEG2,
-           color=bcolors.OKGREEN)
-    printc('          ghost displacements: x: ', sh_float[0], ' y: ', sh_float[1], color=bcolors.OKGREEN)
-
-    # generate a ring mask out of the solar disk to see how much is the ghost image
-    # we will be using complex histrograms....
-    mask_anulus = bin_annulus([yd, xd], rad + 30, 20, full=False)  # 20 10 a 30 20
-    mask_anulus = shift(mask_anulus, shift=(center[0] - xd // 2, center[1] - yd // 2), fill_value=0)
-
-    idx = np.where(mask_anulus == 1)
-    mask_anulus_big = bin_annulus([yd, xd], rad - 100, 150, full=False)  # -150 a -50 y de 100 a 150
-    mask_anulus_big = shift(mask_anulus_big, shift=(center[0] - xd // 2, center[1] - yd // 2), fill_value=0)
-    idx_big = np.where(mask_anulus_big == 1)
-
-    printc('          computing azimuthal averages  ', color=bcolors.OKGREEN)
-
-    centers = np.zeros((2, 6))
-    radius = np.zeros((6))
-    ints = np.zeros((6, int(np.sqrt(xd ** 2 + yd ** 2))))
-    ints_rad = np.zeros((6, int(np.sqrt(xd ** 2 + yd ** 2))))
-    ints_fit = np.zeros((6, int(np.sqrt(xd ** 2 + yd ** 2))))
-    ints_syn = np.zeros((6, int(np.sqrt(xd ** 2 + yd ** 2))))
-    ints_fit_pars = np.zeros((6, 5))
-    factor = np.zeros((6, 4))
-    mean_intensity = np.zeros((6, 4))
-
-    # LOOP in wavelengths!
-    for i in range(zd // 4):
-
-        # STEP --->>> average data in polarization for fitting the limb
-        dummy_data = np.mean(data[i, :, :, :], axis=0)
-
-        # STEP --->>> Find center of average data
-        centers[1, i], centers[0, i], radius[i] = find_center(dummy_data)  # cy,cx....
-
-        # STEP --->>> Generate CLV from averaged data
-        intensity, rad = azimutal_average(dummy_data, [centers[0, i], centers[1, i]])
-        ints[i, 0:len(intensity)] = intensity
-        ints_rad[i, 0:len(intensity)] = rad
-
-        # STEP --->>> FIT LIMB DATA
-        rrange = int(radius[i] + 2)  # 2
-        clv = ints[i, 0:rrange]
-        clv_r = ints_rad[i, 0:rrange]
-        mu = np.sqrt((1 - clv_r ** 2 / clv_r[-1] ** 2))
-
-        if verbose and only_one_vorbose:
-            plt.plot(clv_r, clv)
-            plt.xlabel('Solar radious [pixel]')
-            plt.ylabel('Intensity [DN]')
-            plt.show()
-
-        u = 0.5
-        I0 = 100
-        ande = np.where(mu > 0.1)
-        pars = newton(clv[ande], mu[ande], [I0, u, 0.2, 0.2, 0.2], limb_darkening)
-        fit, _ = limb_darkening(mu, pars)
-        ints_fit[i, 0:len(fit)] = fit
-        ints_fit_pars[i, :] = pars
-
-        # plt.plot(clv_r,clv,label='real clv')
-        # plt.plot(clv_r,fit,label='fit order = 4')
-        # plt.xlabel('Heliocentric angle ['+r'$\theta$]')
-        # plt.ylabel('Intensity [DN]')
-        # plt.legend()
-        # plt.show()
-
-        # STEP --->>> REPLICATE LIMB FIT WITH AVERAGE INTENSITY
-        # Now there are two options. Either we use the fitted CLV or the azimutally averged CLV.
-        # it is the second here but can be easily changed
-
-        ints_syn[i, :] = ints[i, :]
-        ints_syn[i, 0:len(fit)] = fit
-
-        # STEP --->>> NORMALIZE
-        ints_syn[i, :] = ints_syn[i, :] / ints_fit_pars[i][0]
-        ints_fit[i, :] = ints_fit[i, :] / ints_fit_pars[i][0]
-        ints[i, :] = ints[i, :] / ints_fit_pars[i][0]
-
-        # plt.plot(ints_fit[i,:],label='fitted clv')
-        # plt.plot(ints[i,:],'.',label='real clv')
-        # plt.plot(ints_syn[i,:],'--',label='synt clv')
-        # plt.xlabel('Heliocentric angle ['+r'$\theta$]')
-        # plt.ylabel('Intensity [DN]')
-        # plt.legend()
-        # plt.show()
-
-        # STEP --->>> GENERATE GHOST
-
-        nc = (PXEND2 - PXBEG2 + 1) // 2  # center of frame
-        limb_2d = np.zeros((PXEND2 - PXBEG2 + 1, PXEND1 - PXBEG1 + 1))  # generate image for ghost
-        # fill the image with the revoluted fit
-        s_of_gh = int(radius[i] * 1.1)
-        limb_2d[nc - s_of_gh:nc + s_of_gh + 1, nc - s_of_gh:nc + s_of_gh + 1] = genera_2d(ints_syn[i, 0:s_of_gh])
-        xl, yl = limb_2d.shape
-        # plt.imshow(limb_2d)
-        # plt.show()
-
-        # old down here
-        # limb_real = genera_2d(intensity)
-        # xl,yl = limb_real.shape
-        # limb_2d = np.zeros((PXEND2-PXBEG2+1,PXEND1-PXBEG1+1))
-        # limb_2d[ : , : ] = limb_real[xl//2 - yd//2 : xl//2 + yd//2 , yl//2 - xd//2:yl//2 + xd//2] #VERY SAME DATA
-
-        # nuevorango = np.linspace(0,rad[-1]+2,len(rad))
-        # f = interp1d(nuevorango, intensity)
-        # intensity = f(rad)
-
-        # STEP --->>> Smooth and SHIFT GHOST
-
-        limb_2d = gaussian_filter(limb_2d, sigma=(8, 8))
-
-        # #shift ghost to center of image
-        # limb_2d = shift(limb_2d, shift=(int(centers[1,i])-yd//2,int(centers[0,i])-xd//2), fill_value=0)
-        limb_2d = shift_subp(limb_2d, shift=[centers[1, i] - yd // 2, centers[0, i] - xd // 2])
-        # OJO, shift_subp coge como parametros los de shift pero al reves!!!!!!
-        if verbose and only_one_vorbose:
-            plib.show_one(limb_2d, vmax=1, vmin=0, xlabel='pixel', ylabel='pixel', title='limb 2D', cbarlabel=' ',
-                          cmap='gray')
-        # #shift to the position of the ghost
-        reflection = shift(limb_2d, shift=(sh[0], sh[1]), fill_value=0)
-
-        # reflection = shift_subp(limb_2d, shift=[sh_float[1],sh_float[0]])
-        if verbose and only_one_vorbose:
-            plib.show_one(reflection, vmax=1, vmin=0, xlabel='pixel', ylabel='pixel', title='reflection', cbarlabel=' ',
-                          cmap='gray')
-        # s_x,s_y,_ = PHI_shifts_FFT(data[i,:,:,:],prec=500,verbose=True,norma=False)
-
-        # STEP --->>> Correct each modulation
-
-        # factorr=np.array((0.53,0.56,0.44,0.77))
-        # factorr=np.array((0.53,0.56,0.44,0.80))
-        mean_intensity_reference = np.mean(dummy_data[idx_big])
-
-        # Loop over polarization states
-        for j in range(4):
-
-            dummy = data[i, j, :, :]
-            mean_intensity[i, j] = np.mean(dummy[idx_big])
-
-            # FORMA 1 - con anillo
-            values = dummy[idx].flatten()  # Take the ring
-            # show the histogram
-            meanv = np.mean(values)
-            idx_l = np.where(values <= meanv)
-            m_l = np.mean(values[idx_l])
-            idx_r = np.where(values >= meanv)
-            m_r = np.mean(values[idx_r])
-            factor[i, j] = (m_r - m_l) * 100. / ints_fit_pars[i][0]
-            print("factor", factor[i, j])
-
-            # FORMA 2 - ajustando histogramas
-
-            # y,x = np.histogram(values, bins=80)
-            # x = x[:-1]
-            # # weighted arithmetic mean (corrected - check the section below)
-            # # m_l = sum(x * y) / sum(y)
-            # # sigma = np.sqrt(sum(y * (x - m_l)**2) / sum(y))
-
-            # sigma_l = m_l * 0.1
-            # sigma_r = m_r * 0.1
-            # popt,pcov = curve_fit(Gauss2, x, y, p0=[max(y),m_l,sigma_l,max(y),m_r,sigma_r])
-            # _, m_l, _, _ ,m_r, _ = popt #unpack
-            # factor[i,j] = (m_r - m_l) * 100. / ints_fit_pars[i][0]
-            # print("factor-n",factor[i,j])
-
-            # plt.plot(x, y, 'b+:', label='data')
-            # plt.plot(x, Gauss2(x, *popt), 'r-', label='fit')
-            # plt.legend()
-            # plt.title('Histo Fit wl: '+str(i)+' pol: '+str(j)+' factor: '+str(factor[i,j]))
-            # plt.xlabel('DN')
-            # plt.ylabel('Ad')
-            # plt.show()
-
-            # FORMA 3 - con cajitas
-            # bsize = 20
-            # box_right = data[i,j,int(centers[0,i]-bsize/2):int(centers[0,i]+bsize/2),int(centers[1,i]-radius[i]-bsize/2-20 ):int(centers[1,i]-radius[i]+bsize/2-20)]
-            # box_left = data[i,j,int(centers[0,i]-bsize/2):int(centers[0,i]+bsize/2),int(centers[1,i]+radius[i]-bsize/2+20):int(centers[1,i]+radius[i]+bsize/2+20)]
-            # # plib.show_one(box_left)
-            # # plib.show_one(box_right)
-            # m_l = np.mean(box_left)
-            # m_r = np.mean(box_right)
-            # factor[i,j] = (m_r - m_l) * 100. / ints_fit_pars[i][0]
-            # print("factor",factor[i,j])
-
-            if verbose and only_one_vorbose:
-                plt.hist(values, bins=40)
-                plt.title('signal')
-                plt.axvline(meanv, lw=2, color='yellow', alpha=0.4)
-                plt.axvline(m_l, lw=2, color='red', alpha=0.4)
-                plt.axvline(m_r, lw=2, color='blue', alpha=0.4)
-                plt.axvline(factor[i, j] * ints_fit_pars[i][0] / 100., lw=2, color='green', alpha=0.4)
-                plt.show()
-
-            # sub-pixel shift to the position of the ghost
-            # reflection = shift_subp(reflection, shift=[s_x[j],s_y[j]])
-            # MINIMIZA EL ANILLO!!!
-            # The problem is that V works but QU there is a residual at the disk. I use 0.9 though
-
-            # rms = np.zeros((100))
-            # for k in range(100):
-            #     dummy = data[i,j,:,:] - reflection * factor[i,j] / 100. * ints_fit_pars[i][0]  * (k+50)/100.#0.9 # * mean_intensity[i,j] / mean_intensity[i,0]
-            #     rms[k] = np.std(dummy[idx])
-            # plt.plot((np.arange(100)+50)/100.,rms)
-            # plt.show()
-            # cf = np.where(rms == np.min(rms))
-            # data[i,j,:,:] = data[i,j,:,:] - reflection * factor[i,j] / 100. * ints_fit_pars[i][0]  * float((cf[0] + 50)/100.)#0.9 # * mean_intensity[i,j] / mean_intensity[i,0]
-            # print('new',factor[i,j]*float((cf[0] + 50)/100.))
-
-            data[i, j, :, :] = data[i, j, :, :] - reflection * factor[i, j] / 100. * ints_fit_pars[i][0] * \
-                               mean_intensity[i, j] / mean_intensity_reference
-            # data[i,j,:,:] = data[i,j,:,:] - reflection * factorr[j] / 100. * ints_fit_pars[0][0]
-            if verbose and only_one_vorbose:
-                l = ints_fit_pars[i][0]
-                plib.show_two(datap[i, j, :, :], data[i, j, :, :], vmin=[0, 0], vmax=[l * 0.01, l * 0.01], block=True,
-                              pause=0.1, title=['Before', 'After'], xlabel='Pixel', ylabel='Pixel')
-                plt.plot(datap[0, 0, 0:200, 200])
-                plt.plot(data[0, 0, 0:200, 200])
-                plt.ylim([0, l * 0.01])
-                plt.show()
-                plt.plot(datap[0, 0, 200, 0:200])
-                plt.plot(data[0, 0, 200, 0:200])
-                plt.ylim([0, l * 0.01])
-                plt.show()
-
-            only_one_vorbose = 0
-
-    if 'CAL_GHST' in header:  # Check for existence
-        header['CAL_GHST'] = version
-    else:
-        header.set('CAL_GHST', version, 'ghost correction version py module (phifdt_pipe_modules.py)', after='CAL_DARK')
-
-    return data, header
-
-
-def phi_correct_ghost_dm(data, header, rad, verbose=False):
-    '''
-    Startup version on Jun 2021
-    '''
-    version = 'phi_correct_ghost_dm V1.0 Sep 2021 - appied to demodulated images'
-
-    only_one_vorbose = 1
-    center = np.array([header['CRPIX1'], header['CRPIX2']]).astype(int)
-    printc('        Read center from header (updated): x=', center[0], ' y=', center[1], color=bcolors.OKBLUE)
-    xd = int(header['NAXIS1'])
-    yd = int(header['NAXIS2'])
-    zd = int(header['NAXIS3'])
-    PXBEG1 = int(header['PXBEG1']) - 1
-    PXEND1 = int(header['PXEND1']) - 1
-    PXBEG2 = int(header['PXBEG2']) - 1
-    PXEND2 = int(header['PXEND2']) - 1
-
-    if verbose and only_one_vorbose:
-        datap = np.copy(data)
-
-    printc('-->>>>>>> Correcting ghost image ', color=bcolors.OKGREEN)
-
-    # common part
-    coef = [-1.98787669, 1945.28944245]  # empirically (first version)
-
-    # find center of ghost (empirically determined - TBD Newton minimization):
-    center_c = np.copy(center)
-    center_c[0] += PXBEG1
-    center_c[1] += PXBEG2
-    poly1d_fn = np.poly1d(coef)
-    sh = poly1d_fn(center_c).astype(int)
-    sh_float = poly1d_fn(center_c)
-    printc('          image center: x: ', center[0], ' y: ', center[1], color=bcolors.OKGREEN)
-    printc('          image center [for 2048]: x: ', center_c[0], ' y: ', center_c[1], color=bcolors.OKGREEN)
-    printc('          ghost displacements: x: ', sh_float[0], ' y: ', sh_float[1], color=bcolors.OKGREEN)
-
-    # generate a ring mask out of the solar disk to see how much is the ghost image
-    # we will be using complex histrograms....
-    mask_anulus = bin_annulus([yd, xd], rad - 20, 10, full=False)
-    mask_anulus = shift(mask_anulus, shift=(center[0] - xd // 2, center[1] - yd // 2), fill_value=0)
-
-    idx = np.where(mask_anulus == 1)
-    # mask_anulus_big = bin_annulus([yd,xd],rad - 150, 100, full = False)
-    # mask_anulus_big = shift(mask_anulus_big, shift=(center[0]-xd//2,center[1]-yd//2), fill_value=0)
-    # idx_big = np.where(data[0,0,:,:]*mask_anulus_big == 1)
-
-    printc('          computing azimuthal averages  ', color=bcolors.OKGREEN)
-
-    centers = np.zeros((2, 6))
-    radius = np.zeros((6))
-    ints = np.zeros((6, int(np.sqrt(xd ** 2 + yd ** 2))))
-    ints_rad = np.zeros((6, int(np.sqrt(xd ** 2 + yd ** 2))))
-    ints_fit = np.zeros((6, int(np.sqrt(xd ** 2 + yd ** 2))))
-    ints_syn = np.zeros((6, int(np.sqrt(xd ** 2 + yd ** 2))))
-    ints_fit_pars = np.zeros((6, 5))
-    factor = np.zeros((6, 4))
-    mean_intensity = np.zeros((6, 4))
-
-    # do for QUV in continuum (first wavelength)
-    dummy = data[0, 1, :, :]
-    mean_intensity[0, 1] = np.mean(dummy[idx])
-
-    # FORMA 1 - con anillo
-    values = dummy[idx].flatten()  # Take the ring
-    # show the histogram
-    meanv = np.mean(values)
-    idx_l = np.where(values <= meanv)
-    m_l = np.mean(values[idx_l])
-    idx_r = np.where(values >= meanv)
-    m_r = np.mean(values[idx_r])
-    factor[0, 1] = (m_r - m_l)  # * 100. / ints_fit_pars[i][0]
-    print("factor", factor[0, 1])
-
-    plt.hist(values, bins=40)
-    plt.title('signal')
-    plt.axvline(meanv, lw=2, color='yellow', alpha=0.4)
-    plt.axvline(m_l, lw=2, color='red', alpha=0.4)
-    plt.axvline(m_r, lw=2, color='blue', alpha=0.4)
-    # plt.axvline(factor[0,1]*ints_fit_pars[0][0] / 100., lw=2, color='green', alpha=0.4)
-    plt.axvline(factor[0, 1], lw=2, color='green', alpha=0.4)
-    plt.show()
-
-    # LOOP in wavelengths!
-    for i in range(zd // 4):
-
-        # STEP --->>> average data in polarization for fitting the limb
-        dummy_data = np.mean(data[i, :, :, :], axis=0)
-
-        # STEP --->>> Find center of average data
-        centers[1, i], centers[0, i], radius[i] = find_center(dummy_data)  # cy,cx....
-
-        # STEP --->>> Generate CLV from averaged data
-        intensity, rad = azimutal_average(dummy_data, [centers[0, i], centers[1, i]])
-        ints[i, 0:len(intensity)] = intensity
-        ints_rad[i, 0:len(intensity)] = rad
-
-        # STEP --->>> FIT LIMB DATA
-        rrange = int(radius[i] + 2)  # 2
-        clv = ints[i, 0:rrange]
-        clv_r = ints_rad[i, 0:rrange]
-        mu = np.sqrt((1 - clv_r ** 2 / clv_r[-1] ** 2))
-
-        if verbose and only_one_vorbose:
-            plt.plot(clv_r, clv)
-            plt.xlabel('Solar radious [pixel]')
-            plt.ylabel('Intensity [DN]')
-            plt.show()
-
-        u = 0.5
-        I0 = 100
-        ande = np.where(mu > 0.1)
-        pars = newton(clv[ande], mu[ande], [I0, u, 0.2, 0.2, 0.2], limb_darkening)
-        fit, _ = limb_darkening(mu, pars)
-        ints_fit[i, 0:len(fit)] = fit
-        ints_fit_pars[i, :] = pars
-
-        # STEP --->>> REPLICATE LIMB FIT WITH AVERAGE INTENSITY
-        # Now there are two options. Either we use the fitted CLV or the azimutally averged CLV.
-        # it is the second here but can be easily changed
-
-        ints_syn[i, :] = ints[i, :]
-        ints_syn[i, 0:len(fit)] = fit
-
-        # STEP --->>> NORMALIZE
-        ints_syn[i, :] = ints_syn[i, :] / ints_fit_pars[i][0]
-        ints_fit[i, :] = ints_fit[i, :] / ints_fit_pars[i][0]
-        ints[i, :] = ints[i, :] / ints_fit_pars[i][0]
-
-        # STEP --->>> GENERATE GHOST
-
-        nc = (PXEND2 - PXBEG2 + 1) // 2  # center of frame
-        limb_2d = np.zeros((PXEND2 - PXBEG2 + 1, PXEND1 - PXBEG1 + 1))  # generate image for ghost
-        # fill the image with the revoluted fit
-        s_of_gh = int(radius[i] * 1.1)
-        limb_2d[nc - s_of_gh:nc + s_of_gh + 1, nc - s_of_gh:nc + s_of_gh + 1] = genera_2d(ints_syn[i, 0:s_of_gh])
-        xl, yl = limb_2d.shape
-        # plt.imshow(limb_2d)
-        # plt.show()
-
-        # old down here
-        # limb_real = genera_2d(intensity)
-        # xl,yl = limb_real.shape
-        # limb_2d = np.zeros((PXEND2-PXBEG2+1,PXEND1-PXBEG1+1))
-        # limb_2d[ : , : ] = limb_real[xl//2 - yd//2 : xl//2 + yd//2 , yl//2 - xd//2:yl//2 + xd//2] #VERY SAME DATA
-
-        # nuevorango = np.linspace(0,rad[-1]+2,len(rad))
-        # f = interp1d(nuevorango, intensity)
-        # intensity = f(rad)
-
-        # STEP --->>> Smooth and SHIFT GHOST
-
-        # limb_2d = gaussian_filter(limb_2d, sigma=(8, 8))
-
-        # #shift ghost to center of image
-        # limb_2d = shift(limb_2d, shift=(int(centers[1,i])-yd//2,int(centers[0,i])-xd//2), fill_value=0)
-        limb_2d = shift_subp(limb_2d, shift=[centers[1, i] - yd // 2, centers[0, i] - xd // 2])
-        # OJO, shift_subp coge como parametros los de shift pero al reves!!!!!!
-        if verbose and only_one_vorbose:
-            plib.show_one(limb_2d, vmax=1, vmin=0, xlabel='pixel', ylabel='pixel', title='limb 2D', cbarlabel=' ',
-                          cmap='gray')
-        # #shift to the position of the ghost
-        reflection = shift(limb_2d, shift=(sh[0], sh[1]), fill_value=0)
-
-        # reflection = shift_subp(limb_2d, shift=[sh_float[1],sh_float[0]])
-        if verbose and only_one_vorbose:
-            plib.show_one(reflection, vmax=1, vmin=0, xlabel='pixel', ylabel='pixel', title='reflection', cbarlabel=' ',
-                          cmap='gray')
-        # s_x,s_y,_ = PHI_shifts_FFT(data[i,:,:,:],prec=500,verbose=True,norma=False)
-
-        # STEP --->>> Correct each modulation
-
-        for j in range(4):
-
-            dummy = data[i, j, :, :]
-            mean_intensity[i, j] = np.mean(dummy[idx_big])
-
-            # FORMA 1 - con anillo
-            values = dummy[idx].flatten()  # Take the ring
-            # show the histogram
-            meanv = np.mean(values)
-            idx_l = np.where(values <= meanv)
-            m_l = np.mean(values[idx_l])
-            idx_r = np.where(values >= meanv)
-            m_r = np.mean(values[idx_r])
-            factor[i, j] = (m_r - m_l) * 100. / ints_fit_pars[i][0]
-            print("factor", factor[i, j])
-
-            if verbose and only_one_vorbose:
-                plt.hist(values, bins=40)
-                plt.title('signal')
-                plt.axvline(meanv, lw=2, color='yellow', alpha=0.4)
-                plt.axvline(m_l, lw=2, color='red', alpha=0.4)
-                plt.axvline(m_r, lw=2, color='blue', alpha=0.4)
-                plt.axvline(factor[i, j] * ints_fit_pars[i][0] / 100., lw=2, color='green', alpha=0.4)
-                plt.show()
-
-            # sub-pixel shift to the position of the ghost
-            # reflection = shift_subp(reflection, shift=[s_x[j],s_y[j]])
-            # MINIMIZA EL ANILLO!!!
-            # The problem is that V works but QU there is a residual at the disk. I use 0.9 though
-
-            # rms = np.zeros((100))
-            # for k in range(100):
-            #     dummy = data[i,j,:,:] - reflection * factor[i,j] / 100. * ints_fit_pars[i][0]  * (k+50)/100.#0.9 # * mean_intensity[i,j] / mean_intensity[i,0]
-            #     rms[k] = np.std(dummy[idx])
-            # plt.plot((np.arange(100)+50)/100.,rms)
-            # plt.show()
-            # cf = np.where(rms == np.min(rms))
-            # data[i,j,:,:] = data[i,j,:,:] - reflection * factor[i,j] / 100. * ints_fit_pars[i][0]  * float((cf[0] + 50)/100.)#0.9 # * mean_intensity[i,j] / mean_intensity[i,0]
-            # print('new',factor[i,j]*float((cf[0] + 50)/100.))
-
-            data[i, j, :, :] = data[i, j, :, :] - reflection * factor[i, j] / 100. * ints_fit_pars[i][
-                0]  # * mean_intensity[i,j] / mean_intensity[i,0]
-            # data[i,j,:,:] = data[i,j,:,:] - reflection * factor[i,j] / 100. * ints_fit_pars[i][0]  * 0.9 # * mean_intensity[i,j] / mean_intensity[i,0]
-            if verbose and only_one_vorbose:
-                plib.show_two(datap[i, j, :, :], data[i, j, :, :], vmin=[0, 0], vmax=[1, 1], block=True, pause=0.1,
-                              title=['Before', 'After'], xlabel='Pixel', ylabel='Pixel')
-                plt.plot(datap[0, 0, 0:200, 200])
-                plt.plot(data[0, 0, 0:200, 200])
-                plt.ylim([0, 5])
-                plt.show()
-                plt.plot(datap[0, 0, 200, 0:200])
-                plt.plot(data[0, 0, 200, 0:200])
-                plt.ylim([0, 5])
-                plt.show()
-
-            only_one_vorbose = 1
-
-        stop
+    # DEBUG
+    # import pdb; pdb.set_trace()
+
+    # Decode parameters
+    dx, dy, sigma = params[:3]
+    sc = [0] + params[3:]  # insert dummy element 0: no Stokes I ghost correction
+
+    # Demodulate data
+    data = phi_apply_demodulation(data, 'FDT40', verbose=False)
+
+    # Normalize Stokes parameters
+    def get_mask_rad(im):
+        out = find_center(im)
+        ctr = out[0:2]
+        rad = out[2]
+        mask_rad = np.linalg.norm(np.indices(im.shape) - np.full(list(im.shape)+[2], ctr).transpose(), axis=0)
+        return mask_rad, ctr, rad
+
+    def get_disk_mask(im):
+        mask_rad, _, rad = get_mask_rad(im)
+        mask = mask_rad < rad
+        return mask
+
+    def get_disk_mean(im):
+        mask = get_disk_mask(im)
+        return im[mask].mean()
+
+    mean = get_disk_mean(data[0, 0, :])
+    data /= mean
+
+    # Prepare Stokes I for ghost correction
+    def rotate(im, angle):
+        y, x, _ = find_center(im)
+        x = round(x)
+        y = round(y)
+        y_ctr, x_ctr = np.array(im.shape) // 2
+        dx, dy = (x - x_ctr, y - y_ctr)
+        imr = np.roll(im, (-dy, -dx), axis=(0, 1))
+        imr = sp_rotate(imr, angle, reshape=False)
+        imr = np.roll(imr, (dy, dx), axis=(0, 1))
+        return imr
+
+    ff = np.mean(flat[0, :, :, :], axis=0)  # generate average continuum FF
+    si = data[0, 0, :, :] / ff  # apply FF
+    si = rotate(si, 180)
+    if verbose:
+        plt.imshow(si, cmap='gray', vmin=0.5, vmax=1.5)
+        plt.show()
+
+    # Apply ghost correction
+    for i in range(1, 4):
+        for j in range(6):
+            data[j, i, :, :] = data[j, i, :, :] + sc[i] * np.roll(gaussian_filter(si, sigma), (dy, dx), axis=(0, 1))
+
+    # Undo normalization and demodulation
+    data *= mean
+    data = phi_apply_demodulation(data, 'FDT40', verbose=False, modulate=True)
+
+    # Update header
     if 'CAL_GHST' in header:  # Check for existence
         header['CAL_GHST'] = version
     else:
